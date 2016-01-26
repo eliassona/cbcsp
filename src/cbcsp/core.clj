@@ -4,9 +4,17 @@
     [clojure.data.json :as json])
   (:import [com.couchbase.client.java.document RawJsonDocument]
            [rx Observer]
+           [java.util NoSuchElementException]
            [com.couchbase.client.java CouchbaseCluster]
            [com.couchbase.client CouchbaseConnectionFactoryBuilder CouchbaseClient]
-           [com.couchbase.client.java.error TranscodingException]
+           [com.couchbase.client.java.error TranscodingException 
+            DocumentAlreadyExistsException 
+            RequestTooBigException 
+            CouchbaseOutOfMemoryException 
+            CASMismatchException
+            
+            ]
+           [com.couchbase.client.core CouchbaseException]
            [java.net URI]))
 
 
@@ -20,6 +28,7 @@
             (onNext [_ d] (reset! s d))
             (onError [_ e] (put! c (assoc m :error e)))
             (onCompleted [_] (put! c (assoc m :data @s)))))))))
+
 
 (defn create! [bucket c]
   (let [s (subscribe :create)]
@@ -68,13 +77,28 @@
           (s c))
         c))))
 
-(defn retry? [v]
-  (let [e (:error v)]
-    (condp = (:type v)
-      :read-and-lock 
-      )))
+(def fail-map 
+  {:create #{DocumentAlreadyExistsException RequestTooBigException CouchbaseOutOfMemoryException}
+   :read #{TranscodingException NoSuchElementException CouchbaseOutOfMemoryException}
+   :update #{CASMismatchException RequestTooBigException CouchbaseOutOfMemoryException}
+   :delete #{CASMismatchException CouchbaseOutOfMemoryException CouchbaseException}}
+  )
 
-(defn retry-loop! [out-chan nr-of-retries wait-btw-in-ms]
+(defn dig-out-cause [error]
+  (if (and (= (.getClass error) RuntimeException) (.getCause error))
+    (.getCause error)
+    error))
+
+(defn fail? [v]
+  (let [{:keys [type error]} v
+        cause (dig-out-cause error)]
+    (some #(instance? % cause) (type fail-map))
+    )
+  )
+(defn retry? [v]
+  (not (fail? v)))
+
+(defn retry-loop [out-chan nr-of-retries wait-btw-in-ms]
   (fn [crud-fn]
     (go-loop 
       [retry 0]
@@ -85,14 +109,17 @@
               (<! (timeout wait-btw-in-ms))
               (recur (inc retry)))
             (>! out-chan (assoc v :retry retry)))
-          (>! out-chan v))))))
+          (>! out-chan v))))
+    out-chan))
 
 
 
 (def crud-ops {:create create!, :read read, :update update!, :delete delete!})
 
 (defn crud-op-of [bucket crud-chan retry-chan nr-of-retries wait-btw-in-ms]
-  (into {} (map (fn [e] [(key e) (comp (retry-loop! retry-chan nr-of-retries wait-btw-in-ms) ((val e) bucket crud-chan))])) crud-ops))
+  (into {} (map (fn [e] [(key e) (comp (retry-loop retry-chan nr-of-retries wait-btw-in-ms) ((val e) bucket crud-chan))])) crud-ops))
+  
+(defn success? [m] (contains? m :data))
   
 
 (defn consume [config crud-ops]
@@ -102,7 +129,12 @@
       (let [k (key-fn data)]
         (go-loop 
           [retry 0]
-          (let [v (-> k read <!)]
+          (let [rm (-> k read <!)]
+            (if (success? rm)
+              (if (-> rm :data nil?)
+                (assoc (<! (create k {})) :retry true)
+                rm)
+              rm)
           )
         )
   ))))
@@ -152,7 +184,7 @@
 
 (defn test-retry []
   (let [c (chan)]
-    ((retry-loop! c 15 500) ((read-and-lock! bucket (chan)) "0"))
+    ((retry-loop c 15 500) ((read-and-lock! bucket (chan)) "0"))
     (<!! c)))
 
 
