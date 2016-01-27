@@ -129,41 +129,47 @@
     :error))
 
 
-(defn agg-update []
-  )
+(defn agg-update [k m update]
+  (let [m (<! (update k m))]
+    (condp = (doc-status-of m)
+      :success
+      m
+      :error
+      (assoc m :retry (instance? CASMismatchException (:error m)))
+      )))
 
 
-(defn agg-create [data k create agg]
+(defn agg-create [data k create update agg]
   (go 
-    (let [cm (<! (create k {}))]
-      (condp = (doc-status-of cm)
+    (let [m (<! (create k {}))]
+      (condp = (doc-status-of m)
         :success
-        (<! (agg-update (<! (agg data m))))
+        (<! (agg-update k (<! (agg data m)) update))
         :error
-        (assoc cm :do-retry true)
+        (assoc m :retry true)
         ))))
 
 
 
-(defn agg-read [data k read create agg]
+(defn agg-read [data k read create update agg]
   (go 
     (let [m (-> k read <!)]
       (condp = (doc-status-of m)
         :success
-        (<! (agg-update (<! (agg data m))))
+        (<! (agg-update k (<! (agg data m)) update))
         :not-exists
         (<! (agg-create data k create))
         :error
         m))))
 
 (defn consume [config crud-ops]
-  (let [{:keys [key-fn]} config
+  (let [{:keys [key-fn ag]} config
         {:keys [create read update delete]} crud-ops]
     (fn [data]
       (let [k (key-fn data)]
         (go-loop 
           [retry 0]
-          (let [res (<! (agg-read data k read create))]
+          (let [res (<! (agg-read data k read create update agg))]
             (if (:error res)
               (do 
                 ;log error
