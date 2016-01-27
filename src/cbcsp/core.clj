@@ -121,6 +121,33 @@
   
 (defn success? [m] (contains? m :data))
   
+(defn doc-status-of [m]
+  (if (success? m)
+    (if (:data m)
+      :success
+      :not-exists)
+    :error))
+
+
+(defn agg-create [k create]
+  (go 
+    (let [cm (<! (create k {}))]
+      (condp = (doc-status-of cm)
+        :success
+        (println "agg")
+        :error
+        (assoc cm :do-retry true)
+        ))))
+
+(defn agg-read [k read create]
+  (let [m (-> k read <!)]
+    (condp = (doc-status-of m)
+      :success
+      (println "agg")
+      :not-exists
+      (<! (agg-create k create))
+      :error
+      m)))
 
 (defn consume [config crud-ops]
   (let [{:keys [key-fn]} config
@@ -129,15 +156,14 @@
       (let [k (key-fn data)]
         (go-loop 
           [retry 0]
-          (let [rm (-> k read <!)]
-            (if (success? rm)
-              (if (-> rm :data nil?)
-                (assoc (<! (create k {})) :retry true)
-                rm)
-              rm)
-          )
-        )
-  ))))
+          (let [res (<! (agg-read k read create))]
+            (if (:error res)
+              (do 
+                ;log error
+                (if (and (:retry res) (< retry 10))
+                  (recur (inc retry))
+                  res))
+              res)))))))
 
 (defn consume-loop! [config]
   (let [{:keys [in-chan bucket]} config
@@ -145,7 +171,7 @@
     (go-loop 
       []
       (when-let [data (<! in-chan)]
-        (agg data)
+        (<! (agg data))
         (recur)))
     in-chan))
 
