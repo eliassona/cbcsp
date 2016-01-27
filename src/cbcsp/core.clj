@@ -129,25 +129,32 @@
     :error))
 
 
-(defn agg-create [k create]
+(defn agg-update []
+  )
+
+
+(defn agg-create [data k create agg]
   (go 
     (let [cm (<! (create k {}))]
       (condp = (doc-status-of cm)
         :success
-        (println "agg")
+        (<! (agg-update (<! (agg data m))))
         :error
         (assoc cm :do-retry true)
         ))))
 
-(defn agg-read [k read create]
-  (let [m (-> k read <!)]
-    (condp = (doc-status-of m)
-      :success
-      (println "agg")
-      :not-exists
-      (<! (agg-create k create))
-      :error
-      m)))
+
+
+(defn agg-read [data k read create agg]
+  (go 
+    (let [m (-> k read <!)]
+      (condp = (doc-status-of m)
+        :success
+        (<! (agg-update (<! (agg data m))))
+        :not-exists
+        (<! (agg-create data k create))
+        :error
+        m))))
 
 (defn consume [config crud-ops]
   (let [{:keys [key-fn]} config
@@ -156,7 +163,7 @@
       (let [k (key-fn data)]
         (go-loop 
           [retry 0]
-          (let [res (<! (agg-read k read create))]
+          (let [res (<! (agg-read data k read create))]
             (if (:error res)
               (do 
                 ;log error
