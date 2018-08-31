@@ -1,7 +1,11 @@
 (ns cbcsp.core
   (:require 
     [clojure.core.async :refer [put! chan go go-loop >! <! >!! <!! timeout thread dropping-buffer]]
-    [clojure.data.json :as json])
+    [clojure.data.json :as json]
+    [clojure.pprint :refer [pprint]]
+    )
+  (:use [clojure.algo.monads]
+        )
   (:import [com.couchbase.client.java.document RawJsonDocument]
            [rx Observer]
            [java.util NoSuchElementException]
@@ -16,6 +20,11 @@
             ]
            [com.couchbase.client.core CouchbaseException]
            [java.net URI]))
+
+(defmacro dbg [body]
+  `(let [x# ~body]
+     (println "dbg:" '~body "=" x#)
+     x#))
 
 
 (defn subscribe [type]
@@ -114,6 +123,9 @@
 
 
 
+
+
+
 (def crud-ops {:create create!, :read read, :update update!, :delete delete!})
 
 (defn crud-op-of [bucket crud-chan retry-chan nr-of-retries wait-btw-in-ms]
@@ -130,13 +142,14 @@
 
 
 (defn agg-update [k m update]
-  (let [m (<! (update k m))]
-    (condp = (doc-status-of m)
-      :success
-      m
-      :error
-      (assoc m :retry (instance? CASMismatchException (:error m)))
-      )))
+  (go 
+    (let [m (<! (update k m))]
+      (condp = (doc-status-of m)
+        :success
+        m
+        :error
+        (assoc m :retry (instance? CASMismatchException (:error m)))
+        ))))
 
 
 (defn agg-create [data k create update agg]
@@ -149,34 +162,29 @@
         (assoc m :retry true)
         ))))
 
-
-
-(defn agg-read [data k read create update agg]
+(defn agg-read-create [data k read create update agg]
   (go 
     (let [m (-> k read <!)]
-      (condp = (doc-status-of m)
-        :success
-        (<! (agg-update k (<! (agg data m)) update))
-        :not-exists
+      (if (= (doc-status-of m) :not-exists) 
         (<! (agg-create data k create))
-        :error
         m))))
 
 (defn consume [config crud-ops]
-  (let [{:keys [key-fn ag]} config
+  (let [{:keys [key-fn agg]} config
         {:keys [create read update delete]} crud-ops]
     (fn [data]
       (let [k (key-fn data)]
         (go-loop 
           [retry 0]
-          (let [res (<! (agg-read data k read create update agg))]
-            (if (:error res)
+          (let [res (<! (agg-read-create data k read create update agg))]
+            (if (:data res)
+              (<! (agg-update k (<! (agg data res)) update))
               (do 
                 ;log error
                 (if (and (:retry res) (< retry 10))
                   (recur (inc retry))
                   res))
-              res)))))))
+              )))))))
 
 (defn consume-loop! [config]
   (let [{:keys [in-chan bucket]} config
@@ -229,4 +237,22 @@
 
 (defn test-consume-loop []
   (consume-loop! (concat {:in-chan (chan)} (crud-op-of bucket (chan)))))
-  
+
+
+(defn current-date [] (System/currentTimeMillis))
+
+(def one-year (* 365 24 3600 1000))
+
+(defn valid-data? [d] (< (- (current-date) d) one-year))
+
+(defn assoc-current-date [amount] {:date (current-date), :amount amount})
+
+(defn purchase [amount so-far]
+  (if (-> so-far first :date valid-data?)
+    (conj so-far (assoc-current-date (* amount (if (> (reduce + (map :amount so-far)) 100) 0.9 1.0))))
+    [(assoc-current-date amount)]))
+
+(defn customer-purchase [customer amount customers]
+  )
+    
+

@@ -7,4 +7,5 @@
                  [com.couchbase.client/java-client "2.2.3"]
                  [com.couchbase.client/couchbase-client "1.4.10"]
                  [org.clojure/core.async "0.1.346.0-17112a-alpha"]
-                 [org.clojure/data.json "0.2.6"]])
+                 [org.clojure/data.json "0.2.6"]
+                 [org.clojure/algo.monads "0.1.5"]])
